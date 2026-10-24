@@ -1,0 +1,18 @@
+{
+  "name": "peckboard-homekit-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Peckboard WASM plugin — control HomeKit IP accessories through the local homekit-bridge daemon",
+  "scripts": {
+    "bundle": "node esbuild.js",
+    "build": "node esbuild.js && extism-js dist/index.js -i src/index.d.ts -o dist/plugin.wasm",
+    "typecheck": "node esbuild.js --page && tsc -p tsconfig.json && tsc -p ui/tsconfig.json",
+    "test": "node esbuild.js --page && vitest run"
+  },
+  "devDependencies": {
+    "@extism/js-pdk": "^1.1.1",
+    "esbuild": "^0.23.1",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.9"
+  }
+}

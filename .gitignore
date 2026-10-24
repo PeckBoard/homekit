@@ -1,0 +1,6 @@
+node_modules/
+dist/
+src/generated/
+test/.tmp-e2e/
+test/.tmp-real-*/
+test/.shots-real/
