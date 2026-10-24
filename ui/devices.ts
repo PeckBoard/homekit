@@ -1,12 +1,16 @@
-// Devices tab: one card per paired device, polled every few seconds, with a
-// control per characteristic chosen from its format/perms (toggle, slider,
-// select, number, text, or a read-only value). Controls are disabled — with
-// the reason stated on the card — while the device or the bridge is offline.
-// A card isn't re-rendered while the user is dragging / typing in it.
+// Devices tab: one card per device, polled every few seconds, grouped by
+// room (Hue rooms first, then zones, then "Other" for HomeKit / room-less
+// devices). A Hue room or zone header carries a power toggle, a brightness
+// slider and scene chips. Each card has a control per characteristic chosen
+// from its format/perms (toggle, slider, select, number, text, or a
+// read-only value). Controls are disabled — with the reason stated — while
+// the device or the bridge is offline. A card or room header isn't
+// re-rendered while the user is dragging / typing in it.
 
 import { h, icon, btn, toast, errText, openModal, confirmDialog, field, select } from "./dom";
 import { get, put, post, del, ApiError } from "./api";
-import { setupState } from "./setup";
+import { setupState, SETUP_CHANGED } from "./setup";
+import { roomSections, cardActions, isHue, type RoomSection, type HueGroup, type HueScene } from "../src/hue";
 import {
   Device,
   Characteristic,
@@ -187,17 +191,33 @@ export interface DevicesView {
   el: HTMLElement;
   show(): void;
   hide(): void;
+  /// Reload now if visible (e.g. a Hue Bridge was linked or unlinked).
+  reload(): void;
   onSummary(cb: (devices: Device[] | null) => void): void;
+}
+
+/// Hue scenes are re-read every this many polls (and whenever rooms change).
+const SCENES_EVERY = 10;
+
+function isOn(d: Device): boolean {
+  for (const acc of d.accessories ?? []) {
+    for (const svc of acc.services ?? []) {
+      if (HIDDEN_SERVICES.has(svc.type)) continue;
+      const c = (svc.characteristics ?? []).find((x) => x.type === "on" || x.type === "active");
+      if (c && (c.value === true || c.value === 1)) return true;
+    }
+  }
+  return false;
 }
 
 export function devicesView(goDiscover: () => void): DevicesView {
   const banner = h("div");
-  const list = h("div", { class: "cards" }, h("div", { class: "skel" }), h("div", { class: "skel" }));
+  const list = h("div", { class: "rooms" }, h("div", { class: "cards" }, h("div", { class: "skel" }), h("div", { class: "skel" })));
   const refreshBtn = btn("Refresh", { cls: "sm", icon: "refresh", onClick: () => load(true) });
   const el = h(
     "div",
     null,
-    h("div", { class: "section-head" }, h("h2", { text: "Devices" }), h("span", { class: "grow" }), refreshBtn, btn("Pair accessory", { cls: "sm primary", icon: "plus", onClick: goDiscover })),
+    h("div", { class: "section-head" }, h("h2", { text: "Devices" }), h("span", { class: "grow" }), refreshBtn, btn("Add devices", { cls: "sm primary", icon: "plus", onClick: goDiscover })),
     banner,
     list,
   );
@@ -205,12 +225,22 @@ export function devicesView(goDiscover: () => void): DevicesView {
   let visible = false;
   let devices: Device[] | null = null;
   let bridgeError: string | null = null;
+  let groups: HueGroup[] = [];
+  let scenes: HueScene[] = [];
+  let sceneKey = "";
+  let polls = 0;
+  /// The bridge has no Hue routes (older than 0.2.0): stop asking until setup changes.
+  let hueUnsupported = false;
   let summaryCb: (d: Device[] | null) => void = () => undefined;
   const cards = new Map<string, { el: HTMLElement; sig: string; busy: boolean }>();
+  const sections = new Map<string, { el: HTMLElement; head: HTMLElement; grid: HTMLElement; sig: string; busy: boolean }>();
+  window.addEventListener(SETUP_CHANGED, () => {
+    if (setupState.current?.health.reachable && !setupState.current.outdated) hueUnsupported = false;
+  });
 
   function reasonFor(d: Device): string | null {
     if (bridgeError) return "Controls are disabled: homekit-bridge isn't reachable.";
-    if (!d.connected) return `Controls are disabled: ${d.name} is offline (not reachable on the network).`;
+    if (!d.connected) return `Controls are disabled: ${d.name} is offline (${isHue(d) ? "its Hue Bridge can't reach it" : "not reachable on the network"}).`;
     return null;
   }
 
@@ -226,6 +256,7 @@ export function devicesView(goDiscover: () => void): DevicesView {
 
   function card(d: Device): HTMLElement {
     const why = reasonFor(d);
+    const acts = cardActions(d);
     const entry = cards.get(d.id);
     const interacting = (on: boolean) => {
       const e = cards.get(d.id);
@@ -247,14 +278,20 @@ export function devicesView(goDiscover: () => void): DevicesView {
         ? h("span", { class: "pill ok", text: "Connected" })
         : h("span", { class: "pill warn", text: "Offline" });
     const sub = [d.manufacturer, d.model].filter(Boolean).join(" ") || d.category_name || "";
+    const unreachable = bridgeError ? "homekit-bridge isn't reachable" : undefined;
     const el = h(
       "div",
-      { class: "card" + (d.connected ? "" : " offline"), "data-device": d.id },
+      { class: "card" + (d.connected ? "" : " offline"), "data-device": d.id, "data-source": d.source ?? "homekit" },
       h(
         "div",
         { class: "card-head" },
         h("span", { class: "ico" }, icon(CATEGORY_ICON[d.category_name ?? ""] ?? "home")),
-        h("div", { class: "t" }, h("div", { class: "name", text: d.name, title: d.name }), h("div", { class: "sub", text: sub })),
+        h(
+          "div",
+          { class: "t" },
+          h("div", { class: "name-row" }, h("span", { class: "name", text: d.name, title: d.name }), acts.badge ? h("span", { class: "badge src", text: acts.badge, title: "Philips Hue light, via a linked Hue Bridge" }) : null),
+          h("div", { class: "sub", text: sub }),
+        ),
         status,
       ),
       h(
@@ -267,9 +304,11 @@ export function devicesView(goDiscover: () => void): DevicesView {
         "div",
         { class: "card-foot" },
         btn("Identify", { cls: "sm ghost", icon: "zap", disabled: !!why, title: why ?? "Make it blink / beep", onClick: () => identify(d) }),
-        btn("Rename", { cls: "sm ghost", icon: "edit", disabled: !!bridgeError, title: bridgeError ? "homekit-bridge isn't reachable" : undefined, onClick: () => rename(d) }),
+        btn("Rename", { cls: "sm ghost", icon: "edit", disabled: !!bridgeError, title: unreachable, onClick: () => rename(d) }),
         h("span", { class: "spacer" }),
-        btn("Unpair", { cls: "sm danger", icon: "trash", disabled: !!bridgeError, title: bridgeError ? "homekit-bridge isn't reachable" : undefined, onClick: () => unpair(d) }),
+        acts.unpair
+          ? btn("Unpair", { cls: "sm danger", icon: "trash", disabled: !!bridgeError, title: unreachable, onClick: () => unpair(d) })
+          : h("span", { class: "reason", text: "Managed by its Hue Bridge", title: "To remove Hue lights, unlink the bridge on the Discover tab." }),
       ),
     );
     if (entry) entry.el = el;
@@ -279,21 +318,158 @@ export function devicesView(goDiscover: () => void): DevicesView {
   function upsert(d: Device, force: boolean) {
     if (!devices) return;
     const i = devices.findIndex((x) => x.id === d.id);
-    if (i >= 0) devices[i] = d;
-    else devices.push(d);
-    renderCard(d, force);
+    if (i >= 0) {
+      devices[i] = d;
+      renderCard(d, force);
+    } else {
+      devices.push(d);
+      render();
+    }
   }
 
-  function renderCard(d: Device, force: boolean) {
+  /// (Re)render one card; place it in `grid` when given.
+  function renderCard(d: Device, force: boolean, grid?: HTMLElement): HTMLElement {
     const sig = JSON.stringify(d) + "|" + (bridgeError ?? "");
     const prev = cards.get(d.id);
-    if (prev && !force && (prev.sig === sig || prev.busy)) return;
+    if (prev && !force && (prev.sig === sig || prev.busy)) {
+      if (grid && prev.el.parentElement !== grid) grid.appendChild(prev.el);
+      return prev.el;
+    }
     const next = { el: prev?.el as HTMLElement, sig, busy: false };
     cards.set(d.id, next);
     const el = card(d);
     if (prev?.el?.isConnected) prev.el.replaceWith(el);
-    else list.appendChild(el);
+    if (grid && el.parentElement !== grid) grid.appendChild(el);
     next.el = el;
+    return el;
+  }
+
+  // ── rooms ──
+
+  async function setGroup(g: HueGroup, body: { on?: boolean; brightness?: number }): Promise<void> {
+    try {
+      const r = await post<{ group: HueGroup }>(`hue/groups/${encodeURIComponent(g.id)}`, body);
+      if (r.group) groups = groups.map((x) => (x.id === r.group.id ? r.group : x));
+    } catch (e) {
+      toast(`Couldn't change ${g.name}: ${errText(e)}`, "bad");
+      throw e;
+    } finally {
+      if (visible) load();
+    }
+  }
+
+  async function recall(g: HueGroup, s: HueScene, chip: HTMLButtonElement) {
+    chip.disabled = true;
+    chip.classList.add("busy");
+    try {
+      await post(`hue/scenes/${encodeURIComponent(s.id)}/recall`);
+      chip.classList.remove("busy");
+      chip.classList.add("done");
+      chip.prepend(icon("check"));
+      toast(`Scene “${s.name}” recalled in ${g.name}.`, "ok");
+      setTimeout(() => {
+        const sec = sections.get(g.id);
+        if (sec) sec.sig = ""; // repaint the chip row on the next render
+        if (visible) load();
+      }, 1500);
+    } catch (e) {
+      chip.classList.remove("busy");
+      chip.disabled = false;
+      toast(`Couldn't recall “${s.name}”: ${errText(e)}`, "bad");
+    }
+  }
+
+  function roomHead(sec: RoomSection, sc: HueScene[]): HTMLElement {
+    const g = sec.group;
+    const memberIds = new Set(g ? g.device_ids : sec.devices.map((d) => d.id));
+    const members = (devices ?? []).filter((d) => memberIds.has(d.id));
+    const lit = members.filter(isOn).length;
+    const count = g
+      ? members.length
+        ? `${lit} of ${members.length} ${members.length === 1 ? "light" : "lights"} on`
+        : "No lights"
+      : `${sec.devices.length} ${sec.devices.length === 1 ? "device" : "devices"}`;
+    const head = h(
+      "div",
+      { class: "room-head" },
+      h("div", { class: "room-title" }, h("h3", { text: sec.name }), g && g.kind !== "room" ? h("span", { class: "badge", text: "Zone" }) : null, h("span", { class: "muted", text: count })),
+    );
+    if (!g) return head;
+    const busy = (on: boolean) => {
+      const s = sections.get(sec.key);
+      if (s) s.busy = on;
+    };
+    const why = bridgeError
+      ? "Controls are disabled: homekit-bridge isn't reachable."
+      : g.on === null
+        ? `${g.name} has no lights to control.`
+        : members.length && members.every((d) => !d.connected)
+          ? `Controls are disabled: every light in ${g.name} is offline.`
+          : null;
+    const on = g.on === true;
+    const sw = h("button", { type: "button", class: "switch", role: "switch", "aria-checked": on ? "true" : "false", "aria-label": `${g.name} power`, disabled: !!why, title: why || undefined });
+    const state = h("span", { class: "muted state", text: on ? "On" : "Off" });
+    sw.addEventListener("click", () => {
+      const next = sw.getAttribute("aria-checked") !== "true";
+      sw.setAttribute("aria-checked", next ? "true" : "false");
+      state.textContent = next ? "On" : "Off";
+      setGroup(g, { on: next }).catch(() => {
+        sw.setAttribute("aria-checked", next ? "false" : "true");
+        state.textContent = next ? "Off" : "On";
+      });
+    });
+    const bri = typeof g.brightness === "number" ? g.brightness : 0;
+    const r = h("input", { type: "range", min: "0", max: "100", step: "1", value: String(bri), disabled: !!why, title: why || undefined, "aria-label": `${g.name} brightness` }) as HTMLInputElement;
+    const num = h("span", { class: "num", text: `${bri} %` });
+    r.addEventListener("pointerdown", () => busy(true));
+    r.addEventListener("pointercancel", () => busy(false));
+    r.addEventListener("blur", () => busy(false));
+    r.addEventListener("input", () => (num.textContent = `${r.value} %`));
+    r.addEventListener("change", () => {
+      busy(false);
+      const v = Number(r.value);
+      // Dragging brightness up on a room that's off turns it on (as in the Hue app).
+      setGroup(g, !on && v > 0 ? { on: true, brightness: v } : { brightness: v }).catch(() => {
+        r.value = String(bri);
+        num.textContent = `${bri} %`;
+      });
+    });
+    head.append(h("div", { class: "room-ctl" }, sw, state, r, num));
+    if (sc.length) {
+      const chips = h("div", { class: "chips", role: "group", "aria-label": `Scenes in ${g.name}` }, h("span", { class: "chips-k", text: "Scenes" }));
+      for (const s of sc) {
+        const chip = h("button", { type: "button", class: "chip", text: s.name, disabled: !!bridgeError, title: bridgeError ? "homekit-bridge isn't reachable" : `Recall “${s.name}”` }) as HTMLButtonElement;
+        chip.addEventListener("click", () => recall(g, s, chip));
+        chips.append(chip);
+      }
+      head.append(chips);
+    }
+    if (g.kind !== "room" && members.length) head.append(h("div", { class: "room-lights muted", text: "Lights: " + members.map((d) => d.name).join(", ") }));
+    if (why) head.append(h("div", { class: "room-why reason", role: "status", text: why }));
+    return head;
+  }
+
+  function renderSection(sec: RoomSection, showHead: boolean): { el: HTMLElement; grid: HTMLElement } {
+    const sc = sec.group ? scenes.filter((s) => s.group_id === sec.group!.id).sort((a, b) => a.name.localeCompare(b.name)) : [];
+    const memberIds = sec.group ? sec.group.device_ids : sec.devices.map((d) => d.id);
+    const states = (devices ?? []).filter((d) => memberIds.includes(d.id)).map((d) => [d.id, d.name, d.connected, isOn(d)]);
+    const sig = JSON.stringify([sec.name, sec.group, sc.map((s) => [s.id, s.name]), states, sec.devices.length, bridgeError ?? ""]);
+    let s = sections.get(sec.key);
+    if (!s) {
+      const head = h("div");
+      const grid = h("div", { class: "cards" });
+      s = { el: h("section", { class: "room", "data-room": sec.key, "aria-label": sec.name }, head, grid), head, grid, sig: "", busy: false };
+      sections.set(sec.key, s);
+    }
+    if (s.sig !== sig && !s.busy) {
+      const head = roomHead(sec, sc);
+      s.head.replaceWith(head);
+      s.head = head;
+      s.sig = sig;
+    }
+    s.head.hidden = !showHead;
+    s.grid.hidden = !sec.devices.length;
+    return s;
   }
 
   function render() {
@@ -310,22 +486,27 @@ export function devicesView(goDiscover: () => void): DevicesView {
     }
     if (!devices.length) {
       cards.clear();
+      sections.clear();
       list.replaceChildren(
         h(
           "div",
-          { class: "empty", style: { gridColumn: "1 / -1" } },
+          { class: "empty" },
           h("div", { class: "ico" }, icon("home")),
-          h("h3", { text: "No accessories paired yet" }),
+          h("h3", { text: "No devices yet" }),
           h("p", {
             text:
-              "Find HomeKit accessories on your network and pair them with their setup code. An accessory already in Apple Home must be removed there (or factory reset) first.",
+              "Find HomeKit accessories on your network and pair them with their setup code, or link a Philips Hue Bridge to bring in its lights. An accessory already in Apple Home must be removed there (or factory reset) first.",
           }),
-          btn("Discover accessories", { cls: "primary", icon: "search", onClick: goDiscover }),
+          btn("Discover devices", { cls: "primary", icon: "search", onClick: goDiscover }),
         ),
       );
       return;
     }
-    if (list.querySelector(".skel, .empty")) list.replaceChildren();
+    if (list.querySelector(".skel, .empty")) {
+      list.replaceChildren();
+      cards.clear();
+      sections.clear();
+    }
     const ids = new Set(devices.map((d) => d.id));
     for (const [id, c] of cards) {
       if (!ids.has(id)) {
@@ -333,11 +514,48 @@ export function devicesView(goDiscover: () => void): DevicesView {
         cards.delete(id);
       }
     }
-    for (const d of devices) renderCard(d, false);
+    const secs = roomSections(devices, groups);
+    const keys = new Set(secs.map((s) => s.key));
+    for (const [k, s] of sections) {
+      if (!keys.has(k)) {
+        s.el.remove();
+        sections.delete(k);
+      }
+    }
+    // Only HomeKit devices: no room headers, the page looks as before.
+    const showHeads = secs.some((s) => s.key !== "other");
+    secs.forEach((sec, i) => {
+      const s = renderSection(sec, showHeads);
+      if (list.children[i] !== s.el) list.insertBefore(s.el, list.children[i] ?? null);
+      sec.devices.forEach((d, j) => {
+        const c = renderCard(d, false, s.grid);
+        if (s.grid.children[j] !== c) s.grid.insertBefore(c, s.grid.children[j] ?? null);
+      });
+    });
+  }
+
+  /// Rooms + scenes; failures keep the last good copy (an outdated bridge stops the polling).
+  async function loadHue(): Promise<void> {
+    if (hueUnsupported) return;
+    try {
+      groups = (await get<{ groups: HueGroup[] }>("hue/groups")).groups ?? [];
+      const key = groups.map((g) => g.id).join(",");
+      if (!groups.length) scenes = [];
+      else if (key !== sceneKey || polls % SCENES_EVERY === 0) scenes = (await get<{ scenes: HueScene[] }>("hue/scenes")).scenes ?? [];
+      sceneKey = key;
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "bridge_outdated") {
+        hueUnsupported = true;
+        groups = [];
+        scenes = [];
+      }
+    }
   }
 
   async function load(refresh = false) {
     clearTimeout(timer);
+    polls++;
+    const hue = loadHue();
     try {
       const r = await get<{ devices: Device[] }>("devices");
       devices = r.devices;
@@ -346,8 +564,10 @@ export function devicesView(goDiscover: () => void): DevicesView {
     } catch (e) {
       bridgeError = errText(e);
     }
+    await hue;
     render();
     summaryCb(bridgeError ? null : devices);
+    clearTimeout(timer);
     if (visible) timer = window.setTimeout(() => load(), POLL_MS);
   }
 
@@ -363,7 +583,13 @@ export function devicesView(goDiscover: () => void): DevicesView {
   function rename(d: Device) {
     const m = openModal("Rename device", { small: true });
     const inp = h("input", { type: "text", value: d.name, maxlength: "64" }) as HTMLInputElement;
-    const f = field("Name", inp, { hint: d.accessory_name && d.accessory_name !== d.name ? `Accessory's own name: ${d.accessory_name}` : undefined });
+    const f = field("Name", inp, {
+      hint: isHue(d)
+        ? "Changes the name in Peckboard only; the Hue app keeps its own."
+        : d.accessory_name && d.accessory_name !== d.name
+          ? `Accessory's own name: ${d.accessory_name}`
+          : undefined,
+    });
     const save = btn("Save", { cls: "primary", type: "submit" });
     const form = h("form", null, f.el);
     m.body.append(form);
@@ -438,6 +664,9 @@ export function devicesView(goDiscover: () => void): DevicesView {
     hide() {
       visible = false;
       clearTimeout(timer);
+    },
+    reload() {
+      if (visible) load();
     },
     onSummary(cb) {
       summaryCb = cb;

@@ -6,6 +6,7 @@
 import { httpRequest } from "./host";
 import type { BridgeConfig, TokenSource } from "./config";
 import type { Device, Discovered } from "./hap";
+import { versionLt, MIN_HUE_VERSION, type HueBridge, type HueGroup, type HueScene } from "./hue";
 
 export interface Transport {
   request(req: { method: string; url: string; headers: Record<string, string>; body?: string; timeoutSecs: number }): { status: number; body: string };
@@ -27,6 +28,8 @@ export class BridgeError extends Error {
 }
 
 export const UNREACHABLE = "bridge_unreachable";
+/// The bridge predates the Hue endpoints (older than MIN_HUE_VERSION).
+export const OUTDATED = "bridge_outdated";
 
 /// Bridge device ids are MAC-like ("A1:B2:…"); URL-encode for path segments.
 export function encodeId(id: string): string {
@@ -103,6 +106,55 @@ export class Bridge {
     // Pair-setup is SRP + a full accessory-database read: allow a minute.
     return this.call("POST", "/devices/pair", body, 90);
   }
+
+  // ── Philips Hue (bridge 0.2.0) ──
+
+  /// Run a Hue call; a 404 from a bridge older than MIN_HUE_VERSION (no
+  /// /hue routes) becomes `bridge_outdated` with the fix spelled out.
+  private hue<T>(f: () => T): T {
+    try {
+      return f();
+    } catch (e) {
+      if (!(e instanceof BridgeError) || e.status !== 404 || e.code === "not_linked") throw e;
+      let version = "";
+      try {
+        version = String(this.health()?.version ?? "");
+      } catch (_e) {
+        throw e;
+      }
+      if (!versionLt(version, MIN_HUE_VERSION)) throw e;
+      throw new BridgeError(
+        404,
+        OUTDATED,
+        `homekit-bridge ${version || "(unknown version)"} doesn't support Philips Hue — it needs ${MIN_HUE_VERSION} or newer. Update it from the HomeKit page (or reinstall homekit-bridge in App Manager).`,
+      );
+    }
+  }
+  hueBridges(refresh = false): HueBridge[] {
+    const r = this.hue(() => this.call("GET", `/hue/bridges${refresh ? "?refresh=1" : ""}`, undefined, refresh ? 15 : 10));
+    return Array.isArray(r?.bridges) ? r.bridges : [];
+  }
+  /// One link attempt; `link_button_not_pressed` (409) until the button is pressed.
+  hueLink(body: { bridge_id?: string; address?: string }): HueBridge {
+    return this.hue(() => this.call("POST", "/hue/link", body, 15));
+  }
+  hueUnlink(bridgeId: string): void {
+    this.hue(() => this.call("DELETE", `/hue/bridges/${encodeId(bridgeId)}`));
+  }
+  hueGroups(): HueGroup[] {
+    const r = this.hue(() => this.call("GET", "/hue/groups"));
+    return Array.isArray(r?.groups) ? r.groups : [];
+  }
+  hueGroupSet(id: string, body: { on?: boolean; brightness?: number }): HueGroup {
+    return this.hue(() => this.call("POST", `/hue/groups/${encodeId(id)}`, body));
+  }
+  hueScenes(groupId?: string): HueScene[] {
+    const r = this.hue(() => this.call("GET", `/hue/scenes${groupId ? `?group_id=${encodeURIComponent(groupId)}` : ""}`));
+    return Array.isArray(r?.scenes) ? r.scenes : [];
+  }
+  hueRecall(id: string): void {
+    this.hue(() => this.call("POST", `/hue/scenes/${encodeId(id)}/recall`, {}));
+  }
 }
 
 export interface BridgeHealth {
@@ -110,6 +162,8 @@ export interface BridgeHealth {
   version?: string;
   paired?: number;
   connected?: number;
+  hue_bridges?: number;
+  hue_linked?: number;
   token_source: TokenSource;
   error?: string;
   /// It answered but refused the token (so it IS installed and running).
@@ -125,6 +179,8 @@ export function bridgeHealth(t: Transport, cfg: BridgeConfig): BridgeHealth {
     if (typeof h?.version === "string" && h.version) out.version = h.version;
     if (typeof h?.paired === "number") out.paired = h.paired;
     if (typeof h?.connected === "number") out.connected = h.connected;
+    if (typeof h?.hue_bridges === "number") out.hue_bridges = h.hue_bridges;
+    if (typeof h?.hue_linked === "number") out.hue_linked = h.hue_linked;
   } catch (e) {
     out.error = e instanceof Error ? e.message : String(e);
     if (e instanceof BridgeError && e.status === 401) out.auth_failed = true;

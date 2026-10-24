@@ -33,7 +33,10 @@ const header = h("header", { class: "top" }, h("h1", null, icon("home"), "HomeKi
 
 const setup = setupWatch();
 const devices = devicesView(() => go("discover"));
-const discover = discoverView(() => go("devices"));
+const discover = discoverView(
+  () => go("devices"),
+  () => devices.reload(),
+);
 devices.onSummary((list) => {
   summary.replaceChildren();
   if (!list || !list.length) return;

@@ -19,6 +19,7 @@ import {
   OWNED_ELSEWHERE,
   Device,
 } from "./hap";
+import { canUnpair, HUE_UNPAIR, resolveGroup, resolveScene, roomSetBody, type HueBridge } from "./hue";
 
 type Tool = (args: any) => unknown;
 
@@ -120,6 +121,7 @@ export function makeTools(bridge: () => Bridge, note: () => string | null = () =
     homekit_unpair: (args) =>
       run((b) => {
         const d = find(b, args.device);
+        if (!canUnpair(d)) throw new Error(`${d.name} ${HUE_UNPAIR}`);
         let r: { removed_from_accessory?: boolean };
         try {
           r = b.unpair(d.id, args.force === true);
@@ -144,6 +146,109 @@ export function makeTools(bridge: () => Bridge, note: () => string | null = () =
         const d = find(b, args.device);
         b.identify(d.id);
         return { ok: true, device: d.name };
+      }),
+
+    // ── Philips Hue ──
+
+    homekit_hue_bridges: (args) =>
+      run((b) => {
+        const bridges = b.hueBridges(args.refresh === true);
+        return {
+          bridges,
+          hint: bridges.some((x) => !x.linked)
+            ? "Link an unlinked bridge with homekit_hue_link: the user must press the round link button on the bridge, then you call it (again)."
+            : bridges.length
+              ? "Linked bridges' lights are ordinary devices in homekit_list; rooms/zones: homekit_rooms; scenes: homekit_scenes."
+              : "No Hue Bridge seen. Try refresh: true, or pass its IP address to homekit_hue_link.",
+        };
+      }),
+
+    homekit_hue_link: (args) =>
+      run((b) => {
+        const ref = s(args.bridge);
+        const address = s(args.address);
+        let body: { bridge_id?: string; address?: string };
+        let name = ref || address;
+        if (ref || !address) {
+          const all = b.hueBridges(false);
+          let pick: HueBridge | undefined;
+          if (ref) {
+            const n = ref.toLowerCase();
+            const hits = all.filter((x) => x.bridge_id.toLowerCase() === n || x.name.toLowerCase() === n || x.address === ref);
+            if (hits.length > 1) throw new Error(`"${ref}" matches several bridges: ${hits.map((x) => `${x.name} (${x.bridge_id})`).join(", ")} — use the bridge_id`);
+            pick = hits[0];
+            if (!pick && !/^[0-9a-f]{16}$/i.test(ref)) {
+              throw new Error(`no Hue Bridge "${ref}"${all.length ? ` — bridges: ${all.map((x) => `${x.name} (${x.bridge_id})`).join(", ")}` : " — none seen; pass its IP as address"}`);
+            }
+          } else {
+            const unlinked = all.filter((x) => !x.linked);
+            if (unlinked.length > 1) throw new Error(`several unlinked Hue Bridges: ${unlinked.map((x) => `${x.name} (${x.bridge_id})`).join(", ")} — pass bridge`);
+            pick = unlinked[0];
+            if (!pick) throw new Error(all.length ? "every Hue Bridge seen is already linked" : "no Hue Bridge seen on the network — pass its IP as address (homekit_hue_bridges refresh: true to re-scan)");
+          }
+          if (pick?.linked) return { ok: true, already_linked: true, bridge: pick };
+          body = { bridge_id: pick ? pick.bridge_id : ref.toLowerCase() };
+          if (address || pick?.address) body.address = address || pick!.address;
+          name = pick?.name ?? ref;
+        } else body = { address };
+        try {
+          const linked = b.hueLink(body);
+          return { ok: true, linked: true, bridge: linked, hint: "Its lights are now devices in homekit_list; rooms: homekit_rooms." };
+        } catch (e) {
+          if (e instanceof BridgeError && e.code === "link_button_not_pressed") {
+            return {
+              ok: false,
+              linked: false,
+              waiting_for_link_button: true,
+              message: `Ask the user to press the round link button on top of ${name}, then call homekit_hue_link again within 30 seconds.`,
+            };
+          }
+          throw e;
+        }
+      }),
+
+    homekit_rooms: () =>
+      run((b) => {
+        const groups = b.hueGroups();
+        const names = new Map(b.devices().map((d) => [d.id, d.name]));
+        return {
+          rooms: groups.map((g) => ({
+            id: g.id,
+            name: g.name,
+            kind: g.kind,
+            on: g.on,
+            brightness: g.brightness,
+            lights: g.device_ids.map((id) => names.get(id) ?? id),
+          })),
+          ...(groups.length ? {} : { hint: "No Hue rooms: link a Hue Bridge first (homekit_hue_bridges, homekit_hue_link)." }),
+        };
+      }),
+
+    homekit_room_set: (args) =>
+      run((b) => {
+        const body = roomSetBody(args);
+        const g = resolveGroup(b.hueGroups(), args.room);
+        if (g.on === null && g.brightness === null) throw new Error(`${g.name} has no grouped light to control (no lights in it?)`);
+        const after = b.hueGroupSet(g.id, body);
+        return { ok: true, room: g.name, kind: g.kind, sent: body, on: after?.on ?? null, brightness: after?.brightness ?? null };
+      }),
+
+    homekit_scenes: (args) =>
+      run((b) => {
+        const room = s(args.room) ? resolveGroup(b.hueGroups(), args.room) : null;
+        const scenes = b.hueScenes(room?.id);
+        return {
+          scenes: scenes.map((x) => ({ id: x.id, name: x.name, room: x.group_name ?? x.group_id })),
+          ...(scenes.length ? {} : { hint: room ? `${room.name} has no scenes — create them in the Hue app.` : "No scenes: link a Hue Bridge first, or create scenes in the Hue app." }),
+        };
+      }),
+
+    homekit_scene_recall: (args) =>
+      run((b) => {
+        const room = s(args.room) ? resolveGroup(b.hueGroups(), args.room) : null;
+        const sc = resolveScene(b.hueScenes(), args.scene, room);
+        b.hueRecall(sc.id);
+        return { ok: true, scene: sc.name, room: sc.group_name ?? room?.name ?? sc.group_id };
       }),
   };
 }

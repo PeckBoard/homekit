@@ -201,6 +201,75 @@ try {
       return r.status === 201;
     });
   });
+
+  // ── Philips Hue: real bridge program <-> simulated Hue Bridge (CLIP v2) ──
+  const hue = start("hue", "node", [path.join(bridgeDir, "scripts/fake-hue-bridge.mjs"), "--port", "0"]);
+  const hueInfo = await new Promise((res, rej) => {
+    readline.createInterface({ input: hue.stdout }).on("line", (l) => {
+      try {
+        const j = JSON.parse(l);
+        if (j.bridge_id) res(j);
+      } catch {}
+    });
+    hue.on("exit", (c) => rej(new Error("fake hue bridge exited " + c)));
+  });
+  const groups = async () => (await bget("/hue/groups")).groups;
+  const livingRoom = async () => (await groups()).find((g) => g.kind === "room" && g.name === "Living room");
+
+  await check("hue: link a bridge by address in the UI (link button)", async () => {
+    await f.getByRole("tab", { name: "Discover" }).click();
+    const more = f.locator("details.more", { has: f.locator("summary", { hasText: "Link it by address" }) });
+    // Auto-opened when no bridge is found; open it only if closed.
+    await more.evaluate((el) => (el.open = true));
+    await more.getByPlaceholder("192.168.1.30").fill(`127.0.0.1:${hueInfo.port}`);
+    await more.getByRole("button", { name: "Link" }).click();
+    const dlg = f.getByRole("dialog");
+    await dlg.locator("text=Press the button on your Hue Bridge").waitFor();
+    await page.waitForTimeout(2500); // a couple of 409 polls first
+    hue.stdin.write("press\n");
+    await f.locator(".toast", { hasText: /^Linked .+ lights added to Devices/ }).waitFor({ timeout: 20000 });
+    await f.locator(`.drow[data-hue-bridge="${hueInfo.bridge_id}"] .pill`, { hasText: /^Linked$/ }).waitFor();
+  });
+
+  const living = f.locator(".room", { has: f.locator(".room-head h3", { hasText: "Living room" }) });
+  await check("hue: lights grouped under their room, with the Hue badge", async () => {
+    await f.getByRole("tab", { name: "Devices" }).click();
+    await living.waitFor({ timeout: 15000 });
+    await living.locator(".badge.src", { hasText: "Hue" }).first().waitFor();
+  });
+  await page.screenshot({ path: path.join(out, "real-hue.png") });
+
+  await check("hue: room power toggle reaches the bridge", async () => {
+    const before = (await livingRoom()).on;
+    await living.getByRole("switch", { name: "Living room power" }).click();
+    await until("room on=" + !before, async () => (await livingRoom()).on === !before);
+  });
+
+  await check("hue: scene chip recalls the scene", async () => {
+    await living.getByRole("button", { name: "Relax" }).click();
+    await f.locator(".toast", { hasText: "Relax" }).waitFor({ timeout: 10000 });
+    await until("room on after scene", async () => (await livingRoom()).on === true);
+  });
+
+  await check("hue: agent tools set a room and recall a scene", async () => {
+    fs.mkdirSync(path.join(scratch, "hue-agent"), { recursive: true });
+    const folder = await api("POST", "/api/folders", token, { name: "hk-hue", path: path.join(scratch, "hue-agent") });
+    const s = await api("POST", "/api/sessions", token, { name: "hue agent", folder_id: folder.id, model: "mock:mcp" });
+    const block = (tool, args) => "```mcp\n" + JSON.stringify({ tool, args }) + "\n```";
+    await api("POST", `/api/sessions/${s.id}/message`, token, {
+      text: [block("homekit_room_set", { room: "Living room", on: true, brightness: 25 }), block("homekit_scene_recall", { scene: "Relax" }), block("homekit_rooms", {})].join("\n"),
+      model: "mock:mcp",
+    });
+    const events = await until("agent-end", async () => {
+      const ev = await api("GET", `/api/sessions/${s.id}/events`, token);
+      const list = Array.isArray(ev) ? ev : ev.events;
+      return list.some((e) => e.kind === "agent-end") && list;
+    }, 30000);
+    const ends = events.filter((e) => e.kind === "agent-tool-end");
+    if (ends.length !== 3) throw new Error("tool ends: " + JSON.stringify(ends.map((e) => e.data)));
+    for (const e of ends) if (e.data?.error) throw new Error("tool error: " + e.data.error);
+    if (!JSON.stringify(ends[2].data).includes("Living room")) throw new Error("homekit_rooms missing Living room");
+  });
   await browser.close();
 } catch (e) {
   failed++;

@@ -139,7 +139,8 @@ const CSS = `
   .card-head .ico { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; background: var(--accent-subtle); color: var(--accent); flex: none; }
   .card-head .ico svg { width: 16px; height: 16px; }
   .card-head .t { min-width: 0; flex: 1; }
-  .card-head .name { font-weight: 650; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card-head .name-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .card-head .name { font-weight: 650; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .card-head .sub { color: var(--text3); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .card-body { padding: 4px 14px 12px; display: flex; flex-direction: column; gap: 10px; flex: 1; }
   .svc { border-top: 1px solid var(--border); padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
@@ -173,6 +174,42 @@ const CSS = `
   .panel h3 { margin: 0; font-size: 13px; font-weight: 650; }
   .panel p { margin: 0; color: var(--text2); font-size: 12.5px; }
 
+  /* ── rooms (Hue) ── */
+  .rooms { display: flex; flex-direction: column; gap: 22px; }
+  .room-head { display: flex; align-items: center; gap: 10px 18px; flex-wrap: wrap; margin: 0 0 10px; padding: 10px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); }
+  .room:has(> .cards[hidden]) > .room-head { margin-bottom: 0; }
+  .room-title { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex: 1 1 200px; flex-wrap: wrap; }
+  .room-title h3 { margin: 0; font-size: 14px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .room-title .muted { font-size: 12px; font-variant-numeric: tabular-nums; }
+  .room-ctl { display: flex; align-items: center; gap: 10px; flex: 0 1 340px; min-width: 240px; }
+  .room-ctl .state { width: 24px; font-size: 12px; }
+  .room-ctl input[type=range] { flex: 1; min-width: 80px; accent-color: var(--accent); }
+  .room-ctl .num { min-width: 40px; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .chips { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .chips-k { font-size: 11px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; color: var(--text3); margin-right: 2px; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 11px; border-radius: 999px; border: 1px solid var(--border-strong); background: var(--surface2); color: var(--text); font: inherit; font-size: 12px; font-weight: 550; cursor: pointer; white-space: nowrap; }
+  .chip:hover { background: var(--accent-subtle); border-color: var(--accent); color: var(--accent); }
+  .chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .chip.busy { opacity: .7; cursor: progress; }
+  .chip.done { background: var(--success-bg); border-color: var(--success-border); color: var(--success); }
+  .chip[disabled]:not(.busy):not(.done) { opacity: .55; cursor: not-allowed; }
+  .room-lights, .room-why { flex-basis: 100%; font-size: 12px; }
+  .badge.src { color: var(--accent); background: var(--accent-subtle); border-color: transparent; }
+
+  /* ── Hue Bridge (Discover) ── */
+  .hue-section { margin-bottom: 28px; }
+  details.more { margin-top: 10px; }
+  details.more summary { cursor: pointer; color: var(--accent); font-size: 12.5px; font-weight: 550; width: fit-content; }
+  details.more .more-body { margin-top: 10px; padding: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 12px; }
+  .empty.sm { padding: 24px; }
+  .empty.sm p { margin-bottom: 0; }
+  .link-hero { display: flex; gap: 14px; align-items: flex-start; }
+  .link-ico { width: 48px; height: 48px; border-radius: 12px; display: grid; place-items: center; background: var(--accent-subtle); color: var(--accent); flex: none; }
+  .link-ico svg { width: 24px; height: 24px; }
+  .link-hero h3 { margin: 0 0 4px; font-size: 14px; font-weight: 650; }
+  .link-wait { display: flex; flex-direction: column; gap: 6px; }
+  .link-wait .prog > div { transition: width .25s linear; }
+  .countdown { font-size: 12px; color: var(--text2); font-variant-numeric: tabular-nums; }
   /* skeleton */
   .skel { background: linear-gradient(90deg, var(--skel) 25%, var(--skel2) 50%, var(--skel) 75%); background-size: 200% 100%; animation: shimmer 1.3s linear infinite; border-radius: 12px; height: 180px; }
   @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
@@ -212,6 +249,8 @@ const CSS = `
     .drow { grid-template-columns: minmax(0, 1fr); }
     .drow .acts { grid-column: 1; grid-row: auto; justify-content: flex-start; }
     .ctl { grid-template-columns: 96px minmax(0, 1fr); }
+    .room-ctl { flex-basis: 100%; min-width: 0; }
+    .link-hero { flex-direction: column; }
   }
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 `;

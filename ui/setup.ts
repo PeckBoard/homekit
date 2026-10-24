@@ -13,18 +13,26 @@ export interface SetupView {
   log_tail?: string;
   no_systemd?: boolean;
   no_node?: boolean;
+  upgrade?: boolean;
 }
 
 export interface Setup {
   bridge: SetupView;
   health: { reachable: boolean; version?: string; error?: string; auth_failed?: boolean };
   url: string;
+  outdated?: { version: string; min: string } | null;
 }
 
 export const SETUP_CHANGED = "homekit-setup-changed";
 const POLL_MS = 2000;
 
 export const setupState: { current: Setup | null } = { current: null };
+
+let retryFn: () => Promise<void> = async () => undefined;
+/// Restart the setup now (the banner's Retry; also "Update homekit-bridge").
+export function retrySetup(): Promise<void> {
+  return retryFn();
+}
 
 function phaseText(s: SetupView): string {
   switch (s.phase) {
@@ -49,8 +57,13 @@ function banner(s: Setup, retry: () => void): HTMLElement | null {
       h(
         "div",
         { class: "grow" },
-        h("b", { text: "Setting up homekit-bridge…" }),
-        h("p", { text: "HomeKit is installing the local homekit-bridge daemon that talks to your accessories. " + phaseText(b) }),
+        h("b", { text: b.upgrade ? "Updating homekit-bridge…" : "Setting up homekit-bridge…" }),
+        h("p", {
+          text:
+            (b.upgrade
+              ? "Installing the latest homekit-bridge for Philips Hue support. HomeKit accessories reconnect once the service restarts. "
+              : "HomeKit is installing the local homekit-bridge daemon that talks to your accessories. ") + phaseText(b),
+        }),
         h("div", { class: "row" }, h("div", { style: { flex: "1" } }, h("div", { class: "prog indet" }, h("div", { style: { width: "35%" } })))),
       ),
     );
@@ -64,14 +77,16 @@ function banner(s: Setup, retry: () => void): HTMLElement | null {
           ? "homekit-bridge rejected the token"
           : b.status === "external"
             ? `homekit-bridge isn't reachable at ${s.url}`
-            : "Couldn't set up homekit-bridge";
+            : b.upgrade
+              ? "Couldn't update homekit-bridge"
+              : "Couldn't set up homekit-bridge";
     const actions = h("div", { class: "row" });
     if (b.no_node) actions.append(appManagerLink("node", "Install Node.js in App Manager"));
     else if (b.status === "failed" && !s.health.auth_failed) actions.append(appManagerLink("homekit-bridge", "Install with App Manager"));
     if (b.status === "failed" && !s.health.auth_failed) actions.append(btn("Retry", { cls: "sm primary", icon: "refresh", onClick: retry }));
     return h(
       "div",
-      { class: "banner " + (b.no_node || b.no_systemd ? "warn" : "bad"), role: "alert", "data-setup": "bridge" },
+      { class: "banner " + (b.no_node || b.no_systemd || b.upgrade ? "warn" : "bad"), role: "alert", "data-setup": "bridge" },
       icon("warn"),
       h(
         "div",
@@ -98,7 +113,7 @@ export function setupWatch(): { el: HTMLElement; check(): Promise<void> } {
   const apply = (s: Setup) => {
     const was = setupState.current;
     setupState.current = s;
-    if (was?.bridge.status === "running" && s.bridge.status === "ok") toast("homekit-bridge is installed and running.", "ok");
+    if (was?.bridge.status === "running" && s.bridge.status === "ok") toast(was.bridge.upgrade ? "homekit-bridge is updated and running." : "homekit-bridge is installed and running.", "ok");
     el.replaceChildren();
     const b = banner(s, retry);
     if (b) el.appendChild(b);
@@ -126,5 +141,6 @@ export function setupWatch(): { el: HTMLElement; check(): Promise<void> } {
     }
   }
 
+  retryFn = retry;
   return { el, check };
 }

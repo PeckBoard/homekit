@@ -1,8 +1,8 @@
 {
   "name": "peckboard-homekit-plugin",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Peckboard WASM plugin — control HomeKit IP accessories through the local homekit-bridge daemon",
+  "description": "Peckboard WASM plugin — control HomeKit IP accessories and Philips Hue lights through the local homekit-bridge daemon",
   "scripts": {
     "bundle": "node esbuild.js",
     "build": "node esbuild.js && extism-js dist/index.js -i src/index.d.ts -o dist/plugin.wasm",

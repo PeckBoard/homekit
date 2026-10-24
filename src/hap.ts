@@ -48,6 +48,11 @@ export interface Device {
   connected: boolean;
   last_seen?: string;
   accessories: Accessory[];
+  /// "homekit" (paired here) or "hue" (a light of a linked Hue Bridge; 0.2.0).
+  source?: "homekit" | "hue";
+  /// Hue room name / "<bridge_id>:<room_rid>"; null for HomeKit devices.
+  room?: string | null;
+  room_id?: string | null;
 }
 
 export interface Discovered {
@@ -238,7 +243,9 @@ export function resolveDevice(devices: Device[], ref: unknown): Device {
     throw new Error(`"${r}" matches several devices: ${pool.map((d) => `${d.name} (${d.id})`).join(", ")} — use the id`);
   }
   const names = devices.map((d) => d.name).join(", ");
-  throw new Error(`no paired device "${r}"${names ? ` — paired devices: ${names}` : " — nothing is paired yet (homekit_discover, then homekit_pair)"}`);
+  throw new Error(
+    `no paired device "${r}"${names ? ` — paired devices: ${names}` : " — nothing is paired yet (homekit_discover, then homekit_pair; or link a Hue Bridge with homekit_hue_link)"}`,
+  );
 }
 
 /// Does `svcRef` name this service? Its label, its type, or (for a bridged
@@ -469,7 +476,10 @@ export function compactDevice(d: Device): unknown {
       if (Object.keys(values).length) services.push({ service: serviceLabel(svc, acc), type: svc.type, aid: acc.aid, values });
     }
   }
-  return { id: d.id, name: d.name, model: d.model, category: d.category_name, connected: d.connected, services };
+  const out: Record<string, unknown> = { id: d.id, name: d.name, model: d.model, category: d.category_name, connected: d.connected, services };
+  if (d.source) out.source = d.source;
+  if (d.room) out.room = d.room;
+  return out;
 }
 
 /// Full detail for homekit_get: every visible characteristic with metadata.
@@ -477,6 +487,8 @@ export function fullDevice(d: Device): unknown {
   return {
     id: d.id,
     name: d.name,
+    source: d.source,
+    room: d.room ?? undefined,
     accessory_name: d.accessory_name,
     manufacturer: d.manufacturer,
     model: d.model,

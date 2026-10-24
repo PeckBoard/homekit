@@ -9,6 +9,7 @@ import { Bridge, BridgeError, hostTransport } from "./bridge";
 import { bridgeConfig } from "./config";
 import { ensureSetup } from "./setup";
 import { discoveredView, normalizeSetupCode, setupCodeError } from "./hap";
+import { roomSetBody } from "./hue";
 
 export const PAGE_PATH = "/plugin-api/v1/homekit";
 export const API = "/api/plugin-ui/homekit";
@@ -115,7 +116,43 @@ export const ROUTES: Array<[string, Handler]> = [
   ],
   ["GET discover", ({ query }) => ({ accessories: bridge().discover(queryParam(query, "refresh") === "1").map(discoveredView) })],
   ["POST pair", ({ body }) => ({ device: bridge().pair(pairBody(body)) })],
+  ["GET hue/bridges", ({ query }) => ({ bridges: bridge().hueBridges(queryParam(query, "refresh") === "1") })],
+  ["POST hue/link", ({ body }) => ({ bridge: bridge().hueLink(linkBody(body)) })],
+  [
+    "DELETE hue/bridges/:id",
+    ({ params }) => {
+      bridge().hueUnlink(params.id);
+      return { ok: true };
+    },
+  ],
+  ["GET hue/groups", () => ({ groups: bridge().hueGroups() })],
+  ["POST hue/groups/:id", ({ params, body }) => ({ group: bridge().hueGroupSet(params.id, roomSetBody(body ?? {})) })],
+  ["GET hue/scenes", ({ query }) => ({ scenes: bridge().hueScenes(queryParam(query, "group_id") || undefined) })],
+  [
+    "POST hue/scenes/:id/recall",
+    ({ params }) => {
+      bridge().hueRecall(params.id);
+      return { ok: true };
+    },
+  ],
 ];
+
+/// Link body from the page: a bridge id (16 hex) and/or a manual address. Pure.
+export function linkBody(body: any): { bridge_id?: string; address?: string } {
+  const out: { bridge_id?: string; address?: string } = {};
+  const id = str(body?.bridge_id).trim().toLowerCase();
+  const address = str(body?.address).trim();
+  if (id) {
+    if (!/^[0-9a-f]{16}$/.test(id)) throw new HttpError(400, "the bridge id is 16 hex characters (e.g. ecb5fafffe0a1b2c)", "bridge_id");
+    out.bridge_id = id;
+  }
+  if (address) {
+    if (!/^[A-Za-z0-9.\-:\[\]]+$/.test(address)) throw new HttpError(400, "enter an IP address or host name", "address");
+    out.address = address;
+  }
+  if (!out.bridge_id && !out.address) throw new HttpError(400, "enter the bridge's IP address", "address");
+  return out;
+}
 
 /// Match "METHOD pattern" against a request (path relative to API). Pure.
 export function matchRoute(decl: string, method: string, rel: string): Record<string, string> | null {

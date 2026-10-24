@@ -16,6 +16,7 @@
 import { storeGet, storePut, storePutIfAbsent, storeDelete, sh } from "./host";
 import { bridgeConfig, invalidateBridgeToken, DEFAULT_BRIDGE_URL } from "./config";
 import { bridgeHealth, hostTransport, BridgeHealth } from "./bridge";
+import { versionLt, MIN_HUE_VERSION } from "./hue";
 
 export interface SetupJob {
   status: "running" | "succeeded" | "failed";
@@ -30,6 +31,8 @@ export interface SetupJob {
   no_systemd?: boolean;
   /// Node.js is missing or too old: install `node` from App Manager.
   no_node?: boolean;
+  /// Upgrade target version (set when the job upgrades an older bridge).
+  target?: string;
 }
 
 export interface SetupView {
@@ -40,41 +43,64 @@ export interface SetupView {
   log_tail?: string;
   no_systemd?: boolean;
   no_node?: boolean;
+  /// The install is (or was) an upgrade of a running, older bridge.
+  upgrade?: boolean;
 }
 
 export interface SetupState {
   bridge: SetupView;
   health: BridgeHealth;
   url: string;
+  /// The running bridge is too old for Philips Hue.
+  outdated?: { version: string; min: string } | null;
 }
 
-export type BridgeNeed = { kind: "missing"; reason: string } | null;
+export type BridgeNeed = { kind: "missing" | "upgrade"; reason: string; target?: string } | null;
 
-// ── pure ────────────────────────────────────────────────────────────────────
+// ── pure ──────────────────────────────────────────────────────────────────────────
 
-/// Why homekit-bridge must be installed, or null. Only for the default
+/// The running bridge predates Philips Hue support (older than
+/// MIN_HUE_VERSION), or null. Any URL — the page says so even for a bridge
+/// the user runs elsewhere. Pure — tested.
+export function outdatedBridge(health: BridgeHealth): { version: string; min: string } | null {
+  if (!health.reachable) return null;
+  return versionLt(health.version ?? "", MIN_HUE_VERSION) ? { version: health.version ?? "unknown", min: MIN_HUE_VERSION } : null;
+}
+
+/// Why homekit-bridge must be (re)installed, or null. Only for the default
 /// loopback URL — a bridge the user runs elsewhere is theirs to manage — and
-/// never when it answered (a rejected token isn't fixed by reinstalling).
-/// Pure — tested.
+/// never when it refused the token (reinstalling doesn't fix that). A
+/// running bridge older than MIN_HUE_VERSION is upgraded in place (the
+/// installer fetches the latest release). Pure — tested.
 export function bridgeNeed(health: BridgeHealth, url: string): BridgeNeed {
   if (url.replace(/\/+$/, "") !== DEFAULT_BRIDGE_URL) return null;
-  if (health.reachable || health.auth_failed) return null;
+  if (health.reachable) {
+    const old = outdatedBridge(health);
+    return old ? { kind: "upgrade", reason: `homekit-bridge ${old.version} is older than ${old.min} (needed for Philips Hue)`, target: old.min } : null;
+  }
+  if (health.auth_failed) return null;
   return { kind: "missing", reason: "homekit-bridge isn't running" };
 }
 
 const COOLDOWN_FAILED_MS = 60 * 60 * 1000;
 const COOLDOWN_REINSTALL_MS = 30 * 60 * 1000;
 
-/// Should an install start now? Pure — tested.
-export function shouldStart(job: Pick<SetupJob, "status" | "started_at" | "finished_at"> | null, need: BridgeNeed, now: number, force: boolean): boolean {
+/// Should an install start now? An upgrade that already succeeded toward the
+/// same target (the latest release is still too old) isn't repeated until
+/// Retry; an upgrade toward a new target starts at once. Pure — tested.
+export function shouldStart(job: Pick<SetupJob, "status" | "started_at" | "finished_at" | "target"> | null, need: BridgeNeed, now: number, force: boolean): boolean {
   if (job?.status === "running") return false;
   if (!need) return false;
   if (force || !job) return true;
+  if (need.kind === "upgrade") {
+    if (job.target !== need.target) return true;
+    if (job.status === "succeeded") return false;
+  }
   const since = now - (job.finished_at ?? job.started_at);
   return since >= (job.status === "failed" ? COOLDOWN_FAILED_MS : COOLDOWN_REINSTALL_MS);
 }
-
 /// Split `@@TAG` sections of the poll script's output. Pure.
+
 export function parseSections(out: string): Record<string, string> {
   const sections: Record<string, string[]> = {};
   let cur = "";
@@ -201,11 +227,12 @@ function jobDir(): string {
 
 /// Launch the install. Calls run concurrently (manifest `concurrency`); an
 /// atomic claim lets only one launch it.
-function startJob(reason: string): SetupJob | null {
+function startJob(need: NonNullable<BridgeNeed>): SetupJob | null {
   if (!storePutIfAbsent(LOCKS, KEY, Date.now(), LAUNCH_LOCK_SECS)) return getJob();
   const dir = jobDir();
   const pid = Number(sh(LAUNCH, [dir, BRIDGE_INSTALL], 30).trim());
-  const job: SetupJob = { status: "running", reason, dir, pid: isFinite(pid) ? pid : 0, started_at: Date.now() };
+  const job: SetupJob = { status: "running", reason: need.reason, dir, pid: isFinite(pid) ? pid : 0, started_at: Date.now() };
+  if (need.kind === "upgrade") job.target = need.target;
   storePut(JOBS, KEY, job);
   return job;
 }
@@ -215,7 +242,7 @@ function pollJob(job: SetupJob): SetupView {
   const s = parseSections(sh(POLL, [job.dir, String(job.pid)], 30));
   const exitCode = s.EXIT === "" || s.EXIT === undefined ? null : Number(s.EXIT);
   const exited = exitCode !== null && isFinite(exitCode);
-  if (!exited && s.ALIVE === "1") return { status: "running", reason: job.reason, phase: s.PHASE || "starting" };
+  if (!exited && s.ALIVE === "1") return { status: "running", reason: job.reason, phase: s.PHASE || "starting", upgrade: job.target ? true : undefined };
   const next: SetupJob = { ...job, finished_at: Date.now(), log_tail: (s.LOG ?? "").slice(-1500) };
   if (exited && exitCode === 0) {
     next.status = "succeeded";
@@ -233,7 +260,7 @@ function pollJob(job: SetupJob): SetupView {
 }
 
 function failedView(j: SetupJob): SetupView {
-  return { status: "failed", reason: j.reason, error: j.error, log_tail: j.log_tail, no_systemd: j.no_systemd, no_node: j.no_node };
+  return { status: "failed", reason: j.reason, error: j.error, log_tail: j.log_tail, no_systemd: j.no_systemd, no_node: j.no_node, upgrade: j.target ? true : undefined };
 }
 
 // ── entry point ─────────────────────────────────────────────────────────────
@@ -250,7 +277,7 @@ export function ensureSetup(force = false): SetupState {
   if (job?.status !== "running") {
     health = bridgeHealth(hostTransport, cfg);
     need = bridgeNeed(health, cfg.url);
-    if (shouldStart(job, need, now, force)) job = startJob(need!.reason);
+    if (shouldStart(job, need, now, force)) job = startJob(need!);
   }
   let view: SetupView;
   if (job?.status === "running") view = pollJob(job);
@@ -260,12 +287,21 @@ export function ensureSetup(force = false): SetupState {
     else view = { status: cfg.url === DEFAULT_BRIDGE_URL ? "failed" : "external", error: health.error };
   }
   else if (job?.status === "failed") view = failedView(job);
-  else if (job?.status === "succeeded") {
+  else if (job?.status === "succeeded" && need.kind === "upgrade") {
+    // Updated, but the latest release is still too old: say so, don't loop.
+    view = {
+      status: "failed",
+      upgrade: true,
+      reason: need.reason,
+      error: `homekit-bridge was updated to the latest release, but it still reports ${health.version ?? "an unknown version"} — Philips Hue needs ${need.target}. HomeKit accessories keep working.`,
+      log_tail: job.log_tail,
+    };
+  } else if (job?.status === "succeeded") {
     // Installed, but still not answering: say so instead of looping.
     view = { status: "failed", reason: need.reason, error: `homekit-bridge was installed but isn't answering on ${cfg.url}`, log_tail: job.log_tail };
-  } else view = { status: "failed", reason: need.reason, error: health.error };
+  } else view = { status: "failed", upgrade: need.kind === "upgrade" || undefined, reason: need.reason, error: health.error };
   if (view.status === "ok" && !health.reachable && job?.status === "running") health = bridgeHealth(hostTransport, cfg);
-  return { bridge: view, health, url: cfg.url };
+  return { bridge: view, health, url: cfg.url, outdated: outdatedBridge(health) };
 }
 
 /// For tool calls: kick setup off if needed (never throws). Returns a one-line

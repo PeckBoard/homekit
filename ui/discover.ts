@@ -1,12 +1,14 @@
-// Discover tab: HomeKit IP accessories seen on the LAN (GET discover), each
-// with its pairing status and a Pair button; accessories still owned by
-// another controller say so and can't be paired. A manual-add form covers
-// accessories mDNS can't see. Pairing goes through one dialog (setup code
-// with inline validation + optional name).
+// Discover tab: the Hue Bridge section (ui/hue.ts) on top, then HomeKit IP
+// accessories seen on the LAN (GET discover), each with its pairing status
+// and a Pair button; accessories still owned by another controller say so
+// and can't be paired. A manual-add form covers accessories mDNS can't see.
+// Pairing goes through one dialog (setup code with inline validation +
+// optional name).
 
 import { h, icon, btn, toast, errText, openModal, field } from "./dom";
 import { get, post, ApiError } from "./api";
 import { Discovered, Device, OWNED_ELSEWHERE, setupCodeError, normalizeSetupCode } from "../src/hap";
+import { hueSection } from "./hue";
 
 type Row = Discovered & { status: "paired" | "available" | "owned_elsewhere"; note?: string };
 
@@ -23,14 +25,16 @@ export interface DiscoverView {
   hide(): void;
 }
 
-export function discoverView(onPaired: (d: Device) => void): DiscoverView {
+export function discoverView(onPaired: (d: Device) => void, onHueChanged: () => void = () => undefined): DiscoverView {
   const list = h("div", { class: "dlist" });
   const status = h("span", { class: "reason", "aria-live": "polite" });
   const refreshBtn = btn("Scan again", { cls: "sm", icon: "refresh", onClick: () => load(true) });
+  const hue = hueSection(onHueChanged);
   const el = h(
     "div",
     null,
-    h("div", { class: "section-head" }, h("h2", { text: "Accessories on your network" }), status, h("span", { class: "grow" }), refreshBtn),
+    hue.el,
+    h("div", { class: "section-head" }, h("h2", { text: "HomeKit accessories on your network" }), status, h("span", { class: "grow" }), refreshBtn),
     h(
       "div",
       { class: "banner info" },
@@ -139,6 +143,7 @@ export function discoverView(onPaired: (d: Device) => void): DiscoverView {
   return {
     el,
     show() {
+      hue.load();
       load(!loaded);
     },
     hide() {

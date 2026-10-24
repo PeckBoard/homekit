@@ -10,8 +10,12 @@ page, and let agents read and set them through MCP tools.
   lock / unlock, window-covering and garage position, fan speed, and read-only
   sensors (temperature, humidity, contact, motion, battery, …). Discover,
   pair (setup code), rename, identify, unpair.
+- **Philips Hue**: link a Hue Bridge from the Discover tab; its lights show
+  up as devices grouped by room, with room on/off + brightness and scenes.
 - **Agents**: `homekit_list`, `homekit_get`, `homekit_set`,
-  `homekit_discover`, `homekit_pair`, `homekit_unpair`, `homekit_identify`.
+  `homekit_discover`, `homekit_pair`, `homekit_unpair`, `homekit_identify`,
+  `homekit_hue_bridges`, `homekit_hue_link`, `homekit_rooms`,
+  `homekit_room_set`, `homekit_scenes`, `homekit_scene_recall`.
 - **homekit-bridge**: the plugin is a thin client. The HomeKit controller
   (HAP pair-setup, encrypted sessions, event subscriptions, mDNS browsing)
   is the local `homekit-bridge` Node daemon on `127.0.0.1:7782`
@@ -24,7 +28,7 @@ served HTML (see `esbuild.js`).
 
 ```bash
 ./build.sh        # npm install on first run, then dist/plugin.wasm
-npm test          # vitest (name resolution, value coercion, setup codes, tools vs a fake bridge, setup decisions)
+npm test          # vitest (name resolution, value coercion, setup codes, tools vs a fake bridge, setup + upgrade decisions, Hue rooms/scenes)
 npm run typecheck # plugin + ui/
 ```
 
@@ -48,6 +52,26 @@ npm run typecheck # plugin + ui/
   `?force=1`); the accessory still thinks it's paired, so factory reset it
   before adding it to Apple Home.
 
+## Philips Hue
+
+Hue lights come in through a **Hue Bridge** linked to homekit-bridge (CLIP v2,
+local network only); they stay in the Hue app and Apple Home — nothing is
+unpaired.
+
+- **Link**: Discover → **Hue Bridge** lists bridges found on the network.
+  **Link** opens a dialog asking you to press the round button on the bridge
+  and polls for 30 s (every 2 s); if the button isn't pressed in time it says
+  so and offers **Try again**. A bridge discovery can't see: **Bridge not
+  listed? Link it by address** (IP, bridge id optional). **Unlink** forgets the
+  key and removes its lights from Devices.
+- **Devices**: Hue lights are ordinary device cards (power, brightness, color,
+  color temperature) with a **Hue** badge, grouped by room. Each Hue room and
+  zone header has a power toggle, a brightness slider, and its scenes as
+  chips (click to recall). HomeKit and room-less devices sit under **Other**.
+  Hue lights have no Unpair — unlink the bridge instead.
+- **Agents**: Hue lights work with `homekit_list` / `homekit_get` /
+  `homekit_set` by name; rooms and scenes have their own tools (below).
+
 ## Bridge Setup
 
 On page load (and on every tool call) the plugin probes `GET /health` on the
@@ -67,6 +91,14 @@ non-default `bridge_url` is never installed or touched.
 
 Override the release location with `HKB_RELEASES` in Peckboard's environment
 (default `https://github.com/PeckBoard/homekit-bridge/releases/latest/download`).
+
+**Upgrades.** Philips Hue needs homekit-bridge **0.2.0** or newer. When the
+bridge on the default URL answers `GET /health` with an older version, the same
+installer runs again (it fetches the latest release, keeps the token and the
+pairings, and restarts the service); the banner says **Updating
+homekit-bridge…**. If the latest release is still too old, the page says so
+instead of reinstalling in a loop (Retry tries again). A bridge on a
+non-default URL is only reported as outdated.
 
 ## Permissions
 
@@ -97,6 +129,12 @@ Override the release location with `HKB_RELEASES` in Peckboard's environment
 | `homekit_pair`      | `accessory`, `setup_code`, `name?`, `address?`, `port?`| `accessory` = discovered id or name; refuses `owned_elsewhere` with the fix |
 | `homekit_unpair`    | `device`, `force?`                                     | Frees the accessory for Apple Home |
 | `homekit_identify`  | `device`                                               | Blink / beep |
+| `homekit_hue_bridges` | `refresh?`                                           | Hue Bridges seen + linked ones (id, address, linked, connected, light count) |
+| `homekit_hue_link`  | `bridge?`, `address?`                                  | One link attempt; until the button is pressed returns `waiting_for_link_button` with "press the link button, then call again" |
+| `homekit_rooms`     | —                                                      | Hue rooms and zones with `on`, `brightness`, light names |
+| `homekit_room_set`  | `room`, `on?`, `brightness?`                           | Whole room / zone at once (0–100) |
+| `homekit_scenes`    | `room?`                                                | Hue scenes, optionally of one room |
+| `homekit_scene_recall` | `scene`, `room?`                                    | `room` is required when the scene name exists in several rooms |
 
 `device` is a name (exact, then unique substring) or id (colons optional).
 `homekit_set` resolves `characteristic` as the friendly HAP type (`on`,
@@ -132,20 +170,36 @@ names the offending input (pair form). A bridge 401 is returned as 502.
 | `POST devices/:id/identify`            | `POST /devices/{id}/identify`            |
 | `GET discover?refresh=1`               | `GET /discover?refresh=1`                |
 | `POST pair`                            | `POST /devices/pair` (code validated first) |
+| `GET hue/bridges?refresh=1`            | `GET /hue/bridges?refresh=1`             |
+| `POST hue/link` `{bridge_id?, address?}` | `POST /hue/link` (one attempt; 409 `link_button_not_pressed`) |
+| `DELETE hue/bridges/:id`               | `DELETE /hue/bridges/{bridge_id}`        |
+| `GET hue/groups`                       | `GET /hue/groups`                        |
+| `POST hue/groups/:id` `{on?, brightness?}` | `POST /hue/groups/{id}`              |
+| `GET hue/scenes?group_id=`             | `GET /hue/scenes?group_id=`              |
+| `POST hue/scenes/:id/recall`           | `POST /hue/scenes/{id}/recall`           |
+
+A Hue call answered with 404 by a homekit-bridge older than 0.2.0 comes back
+as code `bridge_outdated`.
 
 ## Manual End-to-End Check
 
 `test/fixtures/fake-bridge.mjs` implements `BRIDGE_API.md` in memory (a lamp,
 a thermostat, an offline lock; discovery with a free and an Apple-owned plug;
-pairing accepts `111-22-333`). `test/e2e/page-check.mjs` drives the real page
-in a scratch Peckboard with the plugin sideloaded:
+pairing accepts `111-22-333`; an unlinked Hue Bridge with 3 lights, 2 rooms, a
+zone and 5 scenes whose "link button" is `POST /_test/press-link-button`; a
+third argument `old` emulates homekit-bridge 0.1.0). `test/e2e/page-check.mjs`
+drives the real page in a scratch Peckboard with the plugin sideloaded — HomeKit
+controls, pairing, the Hue link flow (waiting, timeout + Retry, success), room
+toggle / brightness, scene recall, unlink, and the "Update homekit-bridge" state
+against an `old` fake bridge it starts itself (the link timeout makes it take
+~1 min):
 
 ```bash
 ./build.sh
-d=$(mktemp -d); mkdir -p "$d/plugins"; cp dist/plugin.wasm "$d/plugins/homekit.wasm"
+d=test/.tmp-e2e; rm -rf "$d"; mkdir -p "$d/data/plugins"; cp dist/plugin.wasm "$d/data/plugins/homekit.wasm"
 node test/fixtures/fake-bridge.mjs 27433 fake-token-0123456789 &
 PECKBOARD_NO_RESUME=1 PECKBOARD_BOOTSTRAP_USERNAME=hk-user PECKBOARD_BOOTSTRAP_PASSWORD=hk-password-1234 \
-  ../../target/verify/peckboard --data-dir "$d" --port 27431 --https-port 27432 --host 127.0.0.1 &
+  ../../target/verify/peckboard --data-dir "$d/data" --port 27431 --https-port 27432 --host 127.0.0.1 &
 node test/e2e/page-check.mjs http://127.0.0.1:27431 hk-user hk-password-1234 \
   http://127.0.0.1:27433 fake-token-0123456789 "$d/shots"
 ```

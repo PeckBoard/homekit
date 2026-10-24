@@ -7,10 +7,11 @@ import { DEFAULT_BRIDGE_URL } from "./config";
 
 const DESCRIPTION =
   "HomeKit: control HomeKit-over-IP accessories (lights, plugs, switches, thermostats, locks, blinds, garage " +
-  "doors, fans, sensors) from Peckboard — a live device page with per-service controls, discovery and pairing, " +
-  "plus homekit_* MCP tools so agents can read and set device state. Talks to the local homekit-bridge daemon " +
-  "(installed automatically, needs Node.js) on 127.0.0.1:7782. Accessories must be removed from Apple Home before " +
-  "pairing; Bluetooth and Thread accessories are not supported.";
+  "doors, fans, sensors) and Philips Hue lights (via a linked Hue Bridge: lights, rooms, zones, scenes) from Peckboard — " +
+  "a live device page grouped by room with per-service controls, discovery and pairing, plus homekit_* MCP tools so " +
+  "agents can read and set device state. Talks to the local homekit-bridge daemon (installed automatically, needs " +
+  "Node.js) on 127.0.0.1:7782. HomeKit accessories must be removed from Apple Home before pairing; Bluetooth and " +
+  "Thread accessories are not supported.";
 
 const REPOSITORY = "https://github.com/PeckBoard/homekit";
 
@@ -99,8 +100,8 @@ const MCP_TOOLS = [
   {
     name: "homekit_unpair",
     description:
-      "Unpair a device: removes Peckboard's pairing from the accessory (so it can go back to Apple Home) and forgets " +
-      "it. force=true forgets it locally even when the accessory is unreachable.",
+      "Unpair a HomeKit device: removes Peckboard's pairing from the accessory (so it can go back to Apple Home) and forgets " +
+      "it. force=true forgets it locally even when the accessory is unreachable. Not for Hue lights (unlink their bridge on the page).",
     input_schema: {
       type: "object",
       properties: { device: DEVICE_REF, force: { type: "boolean" } },
@@ -112,6 +113,60 @@ const MCP_TOOLS = [
     name: "homekit_identify",
     description: "Make a device identify itself (blink / beep) so the user can tell which one it is.",
     input_schema: deviceOnly(),
+  },
+  {
+    name: "homekit_hue_bridges",
+    description:
+      "Philips Hue Bridges on the LAN and linked ones: bridge_id, name, address, linked, connected, light count. " +
+      "Linked bridges' lights appear as ordinary devices (source: hue, with a room) in homekit_list / homekit_set. refresh=true re-scans.",
+    input_schema: { type: "object", properties: { refresh: { type: "boolean" } }, additionalProperties: false },
+  },
+  {
+    name: "homekit_hue_link",
+    description:
+      "One attempt to link a Hue Bridge (needs its physical link button). bridge = bridge_id or name (optional when exactly one " +
+      "bridge is unlinked); address = its IP for a bridge discovery can't see. Until the user presses the round button on the " +
+      "bridge this returns waiting_for_link_button: ask them to press it, then call again within 30 s.",
+    input_schema: {
+      type: "object",
+      properties: { bridge: { type: "string" }, address: { type: "string" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "homekit_rooms",
+    description: "Hue rooms and zones of every linked bridge with their state (on, brightness 0–100) and light names.",
+    input_schema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "homekit_room_set",
+    description: "Switch a whole Hue room or zone on/off and/or set its brightness (0–100), e.g. {room: \"Living room\", on: true, brightness: 40}.",
+    input_schema: {
+      type: "object",
+      properties: {
+        room: { type: "string", description: "Room or zone name or id (see homekit_rooms)." },
+        on: { type: "boolean" },
+        brightness: { type: "number", minimum: 0, maximum: 100 },
+      },
+      required: ["room"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "homekit_scenes",
+    description: "Hue scenes (from the Hue app), optionally only those of one room or zone.",
+    input_schema: { type: "object", properties: { room: { type: "string" } }, additionalProperties: false },
+  },
+  {
+    name: "homekit_scene_recall",
+    description:
+      "Recall (activate) a Hue scene by name or id. Pass room when the same scene name exists in several rooms (e.g. \"Relax\").",
+    input_schema: {
+      type: "object",
+      properties: { scene: { type: "string" }, room: { type: "string" } },
+      required: ["scene"],
+      additionalProperties: false,
+    },
   },
 ];
 
